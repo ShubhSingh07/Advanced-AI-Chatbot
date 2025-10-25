@@ -1,0 +1,24 @@
+
+directories:
+  store_csv_xlsx_directory: "./data/store_csv_xlsx_files/"
+  store_pdf_directory: "./data/store_pdf_files/"
+  store_docx_directory: "./data/store_docx_files/"
+  store_txt_directory: "./data/store_txt_files/"
+  persist_directory: data/chroma_db
+
+llm_configs:
+  model_name: "gpt-35-turbo"
+  azure_openai
+  Question: {question}\n
+  SQL Query: {query}\n
+  SQL Result: {result}\n
+  Answer:
+  "
+  rag_llm_system_role: "You are a helpful AI assistant. Use the provided context to answer the question at the end. If you don't know the answer, just say that you don't know, don't try to make up an answer."
+  engine: "gpt-35-turbo"
+  temperature: 0.0
+
+rag_configs:
+ collection_name: "csv_sql_db_collection"
+ top_k: 1
+  
