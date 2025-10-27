@@ -41,7 +41,7 @@ def fetch_api_data():
         print(f"✗ Error fetching data: {e}")
         return None
 
-def display_table(data, limit=10):
+def display_table(data, limit=None):
     """Display data in table format"""
     if not data:
         print("✗ No data to display")
@@ -54,25 +54,26 @@ def display_table(data, limit=10):
         return
     
     # Display limited records in simple format
-    display_records = records[:limit]
+    display_records = records[:limit] if limit else records
     
     if display_records:
         # Get column names
         headers = list(display_records[0].keys())
         
-        print("\n" + "=" * 100)
+        print("\n" + "=" * 200)
         print(f"API DATA (Showing {len(display_records)} of {len(records)} records)")
-        print("=" * 100)
+        print(f"Total Columns: {len(headers)}") 
+        print("=" * 200)
         
         # Print headers
-        header_line = " | ".join([f"{h:20}" for h in headers[:5]])  # Show first 5 columns
+        header_line = " | ".join([f"{h:20}" for h in headers])  # Show first 5 columns
         print(header_line)
         print("-" * len(header_line))
         
         # Print rows
         for record in display_records:
             row_values = []
-            for header in headers[:5]:  # Show first 5 columns
+            for header in headers:  # Show first 5 columns
                 value = record.get(header, '')
                 # Truncate long values
                 if isinstance(value, str) and len(value) > 20:
@@ -82,9 +83,11 @@ def display_table(data, limit=10):
                 row_values.append(f"{str(value):20}")
             print(" | ".join(row_values))
         
-        print("=" * 100 + "\n")
+        print("=" * 200 + "\n")
     
     return records
+
+#######
 
 def save_to_csv(data, filename=CSV_FILE, append_mode=True):
     """Convert JSON data to CSV"""
@@ -209,12 +212,30 @@ def save_to_sqlite(data, db_file=DB_FILE, table_name=TABLE_NAME, append_mode=Tru
         return True
     
     except Exception as e:
+        # Diagnostic info to help debug "unable to open database file" errors
+        try:
+            cwd = os.getcwd()
+            file_exists = os.path.exists(db_file)
+            perms = None
+            stat_info = None
+            if file_exists:
+                stat_info = os.stat(db_file)
+                perms = oct(stat_info.st_mode & 0o777)
+        except Exception:
+            cwd = '<unavailable>'
+            file_exists = False
+            perms = '<unavailable>'
+
         print(f"✗ Error saving to SQLite: {e}")
+        print(f"  DB path: {db_file}")
+        print(f"  CWD: {cwd}")
+        print(f"  DB exists: {file_exists}")
+        print(f"  DB perms: {perms}")
         if 'conn' in locals():
             conn.close() # pyright: ignore[reportPossiblyUnboundVariable]
         return False
 
-def view_database_table(db_file=DB_FILE, table_name=TABLE_NAME, limit=10):
+def view_database_table(db_file=DB_FILE, table_name=TABLE_NAME, limit=None):
     """View data from SQLite database in table format"""
     try:
         conn = sqlite3.connect(db_file)
@@ -232,37 +253,56 @@ def view_database_table(db_file=DB_FILE, table_name=TABLE_NAME, limit=10):
         total_count = cursor.fetchone()[0]
         
         # Fetch data
-        cursor.execute(f'SELECT * FROM {table_name} ORDER BY id DESC LIMIT {limit}')
+        if limit:
+            cursor.execute(f'SELECT * FROM {table_name} ORDER BY id DESC LIMIT {limit}')
+        else:
+            cursor.execute(f'SELECT * FROM {table_name} ORDER BY id DESC')
         rows = cursor.fetchall()
         
         # Get column names
         columns = [description[0] for description in cursor.description]
         
-        print("\n" + "=" * 100)
+        print("\n" + "=" * 200)
         print(f"DATABASE TABLE: {table_name}")
         print(f"Total Records: {total_count} | Showing: {len(rows)} (latest entries)")
-        print("=" * 100)
+        print("=" * 200)
         
         # Print headers (first 5 columns)
-        header_line = " | ".join([f"{h:20}" for h in columns[:5]])
+        header_line = " | ".join([f"{h:20}" for h in columns])
         print(header_line)
         print("-" * len(header_line))
         
         # Print rows
         for row in rows:
             row_values = []
-            for value in row[:5]:  # Show first 5 columns
+            for value in row:  # Show first 5 columns
                 if isinstance(value, str) and len(value) > 20:
                     value = value[:17] + '...'
                 row_values.append(f"{str(value):20}")
             print(" | ".join(row_values))
         
-        print("=" * 100 + "\n")
+        print("=" * 200 + "\n")
         
         conn.close()
     
     except Exception as e:
+        # Provide extra diagnostics for inability to open DB
+        try:
+            cwd = os.getcwd()
+            file_exists = os.path.exists(db_file)
+            perms = None
+            if file_exists:
+                perms = oct(os.stat(db_file).st_mode & 0o777)
+        except Exception:
+            cwd = '<unavailable>'
+            file_exists = False
+            perms = '<unavailable>'
+
         print(f"✗ Error viewing database: {e}")
+        print(f"  DB path: {db_file}")
+        print(f"  CWD: {cwd}")
+        print(f"  DB exists: {file_exists}")
+        print(f"  DB perms: {perms}")
 
 def main():
     """Main function to orchestrate the workflow"""
@@ -283,7 +323,7 @@ def main():
         
         # Step 2: Display data in table format
         print("Step 2: Displaying API data in table format...")
-        display_table(data, limit=10)
+        display_table(data, limit=None)
         
         # Step 3: Save to CSV (append mode)
         print("Step 3: Saving to CSV...")
@@ -297,7 +337,7 @@ def main():
         
         # Step 5: View database contents
         print("Step 5: Viewing database contents...")
-        view_database_table(limit=10)
+        view_database_table(limit=None)
         
         print("=" * 100)
         print("✓ Process completed successfully!")
