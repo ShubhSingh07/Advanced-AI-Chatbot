@@ -1,3 +1,9 @@
-pandas>=1.0.0
+# Core dependencies
+gradio>=4.0.0,<5.0.0
+gradio-client>=0.7.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
 
-requests>=2.0.0
+# Your other dependencies
+# Add your existing requirements here

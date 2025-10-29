@@ -1,351 +1,628 @@
+"""
+Fixed Multi-Source Agricultural & Climate Data Fetcher
+With correct data.gov.in resource IDs and error handling
+"""
+
 import requests
-from requests.exceptions import RequestException
-import json
-import csv
 import sqlite3
+import json
 import os
+import time
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
-# API Configuration
-API_KEY = '579b464db66ec23bdd000001cb707f48193e4ff96953ee8fc80258d6'
-RESOURCE_ID = '35be999b-0208-4354-b557-f6ca9a5355de'
-
-# File paths
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-SQL_FOLDER = os.path.join(PROJECT_ROOT, 'sql')
-CSV_FOLDER = os.path.join(PROJECT_ROOT, 'data')
-
-# Create folders if they don't exist
-os.makedirs(SQL_FOLDER, exist_ok=True)
-os.makedirs(CSV_FOLDER, exist_ok=True)
-
-CSV_FILE = os.path.join(CSV_FOLDER, 'data_output.csv')
-DB_FILE = os.path.join(SQL_FOLDER, 'crop_production.db')
-TABLE_NAME = 'api_data'
-
-# Construct the API endpoint URL
-url = f"https://api.data.gov.in/resource/{RESOURCE_ID}?api-key={API_KEY}&format=json&limit=100"
-
-def fetch_api_data():
-    """Fetch data from the API"""
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code >= 400:
-            raise RequestException(f"HTTP {response.status_code}: {response.text[:200]}")
+class MultiSourceDataFetcher:
+    """Fetches and stores data from multiple government data sources"""
+    
+    # CORRECTED Data source configurations from data.gov.in
+    DATA_SOURCES = {
+        'crop_production': {
+            'resource_id': '35be999b-0208-4354-b557-f6ca9a5355de',
+            'table_name': 'crop_production',
+            'description': 'Agricultural Crop Production Statistics',
+            'enabled': True
+        },
+        'rainfall_district': {
+            'resource_id': '8e0bd482-4aba-4d99-9cb9-ff124f6f1c2f',  # District rainfall normal
+            'table_name': 'rainfall_district',
+            'description': 'Daily District-wise Rainfall Data',
+            'enabled': True
+        },
+        'production_crop_specific': {
+            'resource_id': 'f20d7d45-e3d8-4603-bc79-15a3d0db1f9a', 
+            'table_name': 'production_crop_specific',
+            'description': 'Specific Crop Comparison',
+            'enabled': True
+        },
+        'Agency_Rainfall': {
+            'resource_id': '6c05cd1b-ed59-40c2-bc31-e314f39c6971',  # Climate action expenditure
+            'table_name': 'Agency_Rainfall',
+            'description': 'District-wise Agency Rainfall',
+            'enabled': True
+        }
+    }
+    
+    def __init__(self, api_key: str, db_path: str = 'data/agricultural_data.db'):
+        self.api_key = api_key
+        self.db_path = db_path
+        self.base_url = "https://api.data.gov.in/resource"
         
-        data = response.json()
-        print("✓ Data fetched successfully from API")
-        return data
-    
-    except RequestException as e:
-        print(f"✗ Error fetching data: {e}")
-        return None
-
-def display_table(data, limit=None):
-    """Display data in table format"""
-    if not data:
-        print("✗ No data to display")
-        return
-    
-    records = data.get('records', []) if isinstance(data, dict) else data
-    
-    if not records:
-        print("✗ No records found in data")
-        return
-    
-    # Display limited records in simple format
-    display_records = records[:limit] if limit else records
-    
-    if display_records:
-        # Get column names
-        headers = list(display_records[0].keys())
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else "data", exist_ok=True)
         
-        print("\n" + "=" * 200)
-        print(f"API DATA (Showing {len(display_records)} of {len(records)} records)")
-        print(f"Total Columns: {len(headers)}") 
-        print("=" * 200)
-        
-        # Print headers
-        header_line = " | ".join([f"{h:20}" for h in headers])  # Show first 5 columns
-        print(header_line)
-        print("-" * len(header_line))
-        
-        # Print rows
-        for record in display_records:
-            row_values = []
-            for header in headers:  # Show first 5 columns
-                value = record.get(header, '')
-                # Truncate long values
-                if isinstance(value, str) and len(value) > 20:
-                    value = value[:17] + '...'
-                elif isinstance(value, (dict, list)):
-                    value = str(value)[:17] + '...'
-                row_values.append(f"{str(value):20}")
-            print(" | ".join(row_values))
-        
-        print("=" * 200 + "\n")
+        # Initialize database
+        self._init_database()
     
-    return records
-
-#######
-
-def save_to_csv(data, filename=CSV_FILE, append_mode=True):
-    """Convert JSON data to CSV"""
-    if not data:
-        print("✗ No data to save to CSV")
-        return False
-    
-    records = data.get('records', []) if isinstance(data, dict) else data
-    
-    if not records:
-        print("✗ No records found in data")
-        return False
-    
-    # Get all unique keys from all records
-    fieldnames = set()
-    for record in records:
-        if isinstance(record, dict):
-            fieldnames.update(record.keys())
-    
-    fieldnames = sorted(list(fieldnames))
-    
-    try:
-        # Check if file exists to determine write mode
-        file_exists = os.path.exists(filename)
-        mode = 'a' if (append_mode and file_exists) else 'w'
-        
-        with open(filename, mode, newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            
-            # Write header only if new file or overwrite mode
-            if mode == 'w' or not file_exists:
-                writer.writeheader()
-            
-            writer.writerows(records)
-        
-        action = "appended to" if (mode == 'a' and file_exists) else "saved to"
-        print(f"✓ Data {action} CSV: {filename}")
-        return True
-    
-    except Exception as e:
-        print(f"✗ Error saving to CSV: {e}")
-        return False
-
-def save_to_sqlite(data, db_file=DB_FILE, table_name=TABLE_NAME, append_mode=True):
-    """Save JSON data to SQLite database with append mode"""
-    if not data:
-        print("✗ No data to save to database")
-        return False
-    
-    records = data.get('records', []) if isinstance(data, dict) else data
-    
-    if not records:
-        print("✗ No records found in data")
-        return False
-    
-    try:
-        conn = sqlite3.connect(db_file)
+    def _init_database(self):
+        """Initialize database with all required tables"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Get all unique keys from all records
-        columns = set()
-        for record in records:
-            if isinstance(record, dict):
-                columns.update(record.keys())
-        
-        columns = sorted(list(columns))
-        
-        # Check if table exists
-        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
-        table_exists = cursor.fetchone() is not None
-        
-        if not append_mode or not table_exists:
-            # Create/recreate table
-            columns_def = ', '.join([f'"{col}" TEXT' for col in columns])
-            cursor.execute(f'DROP TABLE IF EXISTS {table_name}')
-            cursor.execute(f'''CREATE TABLE {table_name} (
+        # Crop Production table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crop_production (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fetch_timestamp TEXT,
-                {columns_def}
-            )''')
-            print(f"✓ Table '{table_name}' created")
-        else:
-            print(f"✓ Appending to existing table '{table_name}'")
+                state TEXT,
+                district TEXT,
+                crop TEXT,
+                season TEXT,
+                year INTEGER,
+                area REAL,
+                production REAL,
+                data_source TEXT,
+                fetch_timestamp TEXT
+            )
+        """)
         
-        # Add timestamp column for tracking
-        fetch_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Rainfall Data table (District Normal)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rainfall_district (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                SUBDIVISION TEXT,
+                YEAR REAL,
+                jan REAL,
+                feb REAL,
+                mar REAL,
+                apr REAL,
+                may REAL,
+                jun REAL,
+                jul REAL,
+                aug REAL,
+                sep REAL,
+                oct REAL,
+                nov REAL,
+                dec REAL,
+                annual REAL
+            )
+        """)
         
-        # Insert records
-        columns_with_timestamp = ['fetch_timestamp'] + columns
-        placeholders = ', '.join(['?' for _ in columns_with_timestamp])
-       
-        # Build the quoted column list safely, then format the insert query
-        quoted_cols = ", ".join([f'"{col}"' for col in columns_with_timestamp])
-        insert_query = f'INSERT INTO {table_name} ({quoted_cols}) VALUES ({placeholders})'
+        # CROP PRODUCTION CROP-SPECIFIC
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS production_crop_specific (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                State TEXT,
+                District TEXT,
+                Wheat INT,
+                Maize INT,
+                Rice INT,
+                Barley INT,
+                Ragi INT,
+                Pulses INT,
+                common_millets INT,
+                Total INT,
+                Chillies INT,
+                Ginger INT,
+                Oil_seeds INT
+            )
+        """)
         
-        inserted_count = 0
-        for record in records:
-            if isinstance(record, dict):
-                values = [fetch_time]
-                for col in columns:
-                    val = record.get(col, None)
-                    if isinstance(val, (dict, list)):
-                        val = json.dumps(val)
-                    # Ensure we always append a string (use empty string for None)
-                    values.append(str(val) if val is not None else "")
-                
-                cursor.execute(insert_query, values)
-                inserted_count += 1
+        # Expenditure Data table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Agency_Rainfall (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                State TEXT,
+                District TEXT,
+                Date,
+                Year INT,
+                Month TEXT,
+                Avg_rainfall INT,
+                Agency_name TEXT
+            )
+        """)
+        
+        # Metadata table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS data_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT UNIQUE,
+                resource_id TEXT,
+                last_updated TEXT,
+                record_count INTEGER,
+                description TEXT,
+                fetch_status TEXT
+            )
+        """)
         
         conn.commit()
-        
-        # Get total count
-        cursor.execute(f'SELECT COUNT(*) FROM {table_name}')
-        total_count = cursor.fetchone()[0]
-        
-        print(f"✓ Data saved to SQLite: {db_file}")
-        print(f"  Table: {table_name}")
-        print(f"  Records inserted: {inserted_count}")
-        print(f"  Total records in database: {total_count}")
-        
         conn.close()
-        return True
+        print("✅ Database initialized with all tables")
     
-    except Exception as e:
-        # Diagnostic info to help debug "unable to open database file" errors
-        try:
-            cwd = os.getcwd()
-            file_exists = os.path.exists(db_file)
-            perms = None
-            stat_info = None
-            if file_exists:
-                stat_info = os.stat(db_file)
-                perms = oct(stat_info.st_mode & 0o777)
-        except Exception:
-            cwd = '<unavailable>'
-            file_exists = False
-            perms = '<unavailable>'
+    def fetch_data(self, resource_id: str, limit: int = 1000, offset: int = 0, 
+                   max_retries: int = 3) -> Optional[Dict]:
+        """Fetch data from data.gov.in API with retry logic"""
+        url = f"{self.base_url}/{resource_id}"
+        params = {
+            'api-key': self.api_key,
+            'format': 'json',
+            'limit': limit,
+            'offset': offset
+        }
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"  Attempting fetch (try {attempt + 1}/{max_retries})...")
+                response = requests.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Check if we got valid data
+                if 'records' in data and data['records']:
+                    print(f"  ✓ Fetched {len(data['records'])} records")
+                    return data
+                else:
+                    print(f"  ⚠️ No records found in response")
+                    return None
+                    
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    print(f"  ❌ Resource not found (404): {resource_id}")
+                    return None
+                elif e.response.status_code == 429:
+                    wait_time = 2 ** attempt
+                    print(f"  ⚠️ Rate limited. Waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"  ❌ HTTP Error {e.response.status_code}")
+                    if attempt == max_retries - 1:
+                        return None
+            except requests.exceptions.Timeout:
+                print(f"  ⚠️ Timeout. Retrying...")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+            except Exception as e:
+                print(f"  ❌ Error: {str(e)}")
+                if attempt == max_retries - 1:
+                    return None
+        
+        return None
+    
+    def normalize_crop_data(self, records: List[Dict]) -> List[tuple]:
+        """Normalize crop production data"""
+        normalized = []
+        timestamp = datetime.now().isoformat()
+        
+        for record in records:
+            try:
+                # Try different field name variations
+                state = (record.get('state_name') or record.get('State') or 
+                        record.get('state') or '').strip()
+                district = (record.get('district_name') or record.get('District') or 
+                           record.get('district') or '').strip()
+                crop = (record.get('crop') or record.get('Crop') or '').strip()
+                season = (record.get('season') or record.get('Season') or '').strip()
+                
+                year_val = record.get('year') or record.get('Year') or record.get('crop_year') or 0
+                year = int(year_val) if year_val else 0
+                
+                # Handle area and production
+                area_str = str(record.get('area') or record.get('Area') or '0')
+                prod_str = str(record.get('production') or record.get('Production') or '0')
+                
+                area = float(area_str) if area_str not in ['NA', 'N/A', '', 'null'] else 0.0
+                production = float(prod_str) if prod_str not in ['NA', 'N/A', '', 'null'] else 0.0
+                
+                if state and year > 0:  # Only add if we have minimum required data
+                    normalized.append((
+                        state, district, crop, season, year, area, production,
+                        'data.gov.in_crop_production', timestamp
+                    ))
+            except Exception as e:
+                continue
+        
+        return normalized
+    
+    def normalize_rainfall_district_data(self, records: List[Dict]) -> List[tuple]:
+        """
+        Normalize district rainfall data to match rainfall_district table schema:
+        (SUBDIVISION, YEAR, jan, feb, ..., dec, annual)
+        """
+        normalized = []
+        current_year = datetime.now().year
 
-        print(f"✗ Error saving to SQLite: {e}")
-        print(f"  DB path: {db_file}")
-        print(f"  CWD: {cwd}")
-        print(f"  DB exists: {file_exists}")
-        print(f"  DB perms: {perms}")
-        if 'conn' in locals():
-            conn.close() # pyright: ignore[reportPossiblyUnboundVariable]
-        return False
+        for record in records:
+            try:
+                # Extract subdivision / district name
+                subdivision = (
+                    record.get('subdivision') or
+                    record.get('SUBDIVISION') or
+                    record.get('district_name') or
+                    record.get('District') or
+                    record.get('district') or
+                    record.get('state_ut_name') or
+                    record.get('State') or
+                    record.get('state') or ''
+                ).strip()
 
-def view_database_table(db_file=DB_FILE, table_name=TABLE_NAME, limit=None):
-    """View data from SQLite database in table format"""
-    try:
-        conn = sqlite3.connect(db_file)
+                # Extract year if available, else use current year
+                year = record.get('year') or record.get('YEAR') or current_year
+                try:
+                    year = float(year)
+                except:
+                    year = float(current_year)
+
+                # Monthly rainfall values
+                months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                        'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+                rainfall_values = []
+
+                for month in months:
+                    val_str = str(record.get(month) or record.get(month.upper()) or '0')
+                    try:
+                        val = float(val_str) if val_str not in ['NA', '', 'null'] else 0.0
+                    except:
+                        val = 0.0
+                    rainfall_values.append(val)
+
+                # Annual total
+                annual_str = str(record.get('annual') or record.get('ANNUAL') or '0')
+                try:
+                    annual = float(annual_str) if annual_str not in ['NA', '', 'null'] else sum(rainfall_values)
+                except:
+                    annual = sum(rainfall_values)
+
+                # Append normalized row (matching DB schema)
+                if subdivision:
+                    normalized.append((
+                        subdivision,
+                        year,
+                        *rainfall_values,
+                        annual
+                    ))
+
+            except Exception as e:
+                continue
+
+        return normalized
+    
+    def normalize_production_crop_specific(self, records: List[Dict]) -> List[tuple]:
+        """Normalize crop production data to match production_crop_specific table schema"""
+
+        normalized = []
+        skipped_no_state_district = 0
+        skipped_errors = 0
+        
+        print(f"  🔍 DEBUG: Starting normalization of {len(records)} records")
+        
+        # Print first record to see structure
+        if records:
+            print(f"  📋 Sample record keys: {list(records[0].keys())}")
+            print(f"  📋 Sample record: {records[0]}")
+        
+        for idx, record in enumerate(records):
+            try:
+                # Extract State and District - THE API USES LOWERCASE!
+                state = (record.get('state') or record.get('State') or 
+                        record.get('state_ut') or '').strip()
+                district = (record.get('district') or record.get('District') or 
+                            record.get('district_name') or '').strip()
+
+                if not state or not district:
+                    skipped_no_state_district += 1
+                    if skipped_no_state_district <= 3:
+                        print(f"  ⚠️  Record {idx}: Missing state/district")
+                        print(f"      Available keys: {list(record.keys())}")
+                    continue
+
+                # Helper to safely parse int values
+                def to_int(value):
+                    try:
+                        if value in [None, "", "NA", "null", "Null", "NULL"]:
+                            return 0
+                        return int(float(value))
+                    except:
+                        return 0
+
+                # ✅ FIXED: Use the ACTUAL field names from the API
+                wheat = to_int(record.get('wheat_in_metric_tonnes_'))
+                maize = to_int(record.get('maize_in_metric_tonnes_'))
+                rice = to_int(record.get('rice_in_metric_tonnes_'))
+                barley = to_int(record.get('barley_in_metric_tonnes_'))
+                ragi = to_int(record.get('ragi_in_metric_tonnes_'))
+                pulses = to_int(record.get('pulses_in_metric_tonnes_'))
+                common_millets = to_int(record.get('common_millets_in_metric_tonnes_'))
+                total = to_int(record.get('total_food_grains_in_metric_tonnes_'))
+                chillies = to_int(record.get('chillies_in_metric_tonnes_'))
+                ginger = to_int(record.get('ginger_in_metric_tonnes_'))
+                oil_seeds = to_int(record.get('oil_seeds_in_metric_tonnes_'))
+
+                normalized.append((
+                    state, district, wheat, maize, rice, barley, ragi, pulses,
+                    common_millets, total, chillies, ginger, oil_seeds
+                ))
+                
+                # Show first successful record
+                if len(normalized) == 1:
+                    print(f"  ✅ First normalized record: State={state}, District={district}, Wheat={wheat}, Rice={rice}")
+
+            except Exception as e:
+                skipped_errors += 1
+                if skipped_errors <= 3:
+                    print(f"  ❌ Record {idx} error: {str(e)}")
+                    print(f"      Record: {record}")
+                continue
+        
+        print(f"\n  📊 Normalization Summary:")
+        print(f"     Total records processed: {len(records)}")
+        print(f"     Successfully normalized: {len(normalized)}")
+        print(f"     Skipped (no state/district): {skipped_no_state_district}")
+        print(f"     Skipped (errors): {skipped_errors}")
+        
+        return normalized
+    def normalize_Agency_Rainfall_data(self, records: List[Dict]) -> List[tuple]:
+        """
+        Normalize agency rainfall data to match Agency_Rainfall table schema:
+        (State, District, Date, Year, Month, Avg_rainfall, Agency_name)
+        """
+
+        normalized = []
+        skipped_no_state = 0
+        skipped_errors = 0
+
+        print(f"  🔍 DEBUG: Starting normalization of {len(records)} Agency Rainfall records")
+
+        # Print first record structure
+        if records:
+            print(f"  📋 Sample record keys: {list(records[0].keys())}")
+            print(f"  📋 Sample record: {records[0]}")
+
+        for idx, record in enumerate(records):
+            try:
+                # Extract State & District
+                state = (record.get('state') or record.get('State') or
+                        record.get('state_ut') or record.get('State/UT') or '').strip()
+
+                district = (record.get('district') or record.get('District') or
+                            record.get('district_name') or '').strip()
+
+                if not state:
+                    skipped_no_state += 1
+                    if skipped_no_state <= 3:
+                        print(f"  ⚠️  Record {idx}: Missing state")
+                        print(f"      Available keys: {list(record.keys())}")
+                    continue
+
+                # Extract Date (string format retained)
+                date_val = record.get('date') or record.get('Date') or record.get('observation_date') or ''
+                date_str = str(date_val).strip()
+
+                # Extract year
+                year_val = record.get('year') or record.get('Year')
+                if not year_val and date_str:
+                    try:
+                        year_val = int(date_str[:4])  # Expected YYYY-MM-DD
+                    except:
+                        year_val = None
+                year = int(year_val) if year_val else None
+
+                # Extract month
+                month = (record.get('month') or record.get('Month') or '').strip()
+                if not month and date_str:
+                    try:
+                        # Extract MM from YYYY-MM-DD and convert to short name
+                        month_num = int(date_str[5:7])
+                        month = datetime.strptime(str(month_num), "%m").strftime("%b")  # e.g., "Jan"
+                    except:
+                        month = ''
+
+                # Parse rainfall
+                rf = record.get('avg_rainfall') or record.get('rainfall_mm') or record.get('rainfall') or 0
+                try:
+                    avg_rainfall = float(rf)
+                except:
+                    avg_rainfall = 0.0
+
+                # Extract agency name
+                agency = (record.get('agency') or record.get('Agency') or
+                        record.get('source') or record.get('data_source') or '').strip()
+
+                # Append normalized row (matching DB schema)
+                if state and year:
+                    normalized.append((
+                        state, district, date_str, year, month, avg_rainfall, agency
+                    ))
+
+                    # Show first success
+                    if len(normalized) == 1:
+                        print(f"  ✅ First normalized record: State={state}, Year={year}, Rainfall={avg_rainfall}")
+
+            except Exception as e:
+                skipped_errors += 1
+                if skipped_errors <= 3:
+                    print(f"  ❌ Error in record {idx}: {str(e)}")
+                    print(f"      Record: {record}")
+                continue
+
+        print(f"\n  📊 Normalization Summary (Agency Rainfall):")
+        print(f"     Total records processed: {len(records)}")
+        print(f"     Successfully normalized: {len(normalized)}")
+        print(f"     Skipped (no state): {skipped_no_state}")
+        print(f"     Skipped (errors): {skipped_errors}")
+
+        return normalized
+
+    
+    def save_to_database(self, table_name: str, data: List[tuple], 
+                        columns: List[str]) -> Tuple[int, str]:
+        """Save normalized data to database"""
+        if not data:
+            return 0, "No data to save"
+        
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Check if table exists
-        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
-        if not cursor.fetchone():
-            print(f"✗ Table '{table_name}' does not exist")
+        placeholders = ','.join(['?' for _ in columns])
+        column_names = ','.join(columns)
+        
+        query = f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})"
+        
+        try:
+            cursor.executemany(query, data)
+            conn.commit()
+            inserted = len(data)
+            
+            # Update metadata
+            cursor.execute("""
+                INSERT OR REPLACE INTO data_metadata 
+                (table_name, last_updated, record_count, fetch_status)
+                VALUES (?, ?, (SELECT COUNT(*) FROM {table}), 'success')
+            """.format(table=table_name), (table_name, datetime.now().isoformat()))
+            
+            conn.commit()
             conn.close()
-            return
+            return inserted, "success"
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            return 0, f"Error: {str(e)}"
+    
+    def fetch_all_sources(self, verbose: bool = True):
+        """Fetch data from all configured sources"""
+        if verbose:
+            print("\n" + "="*80)
+            print("🚀 Multi-Source Data Fetching Started")
+            print("="*80 + "\n")
         
-        # Get total count
-        cursor.execute(f'SELECT COUNT(*) FROM {table_name}')
-        total_count = cursor.fetchone()[0]
+        results = {}
         
-        # Fetch data
-        if limit:
-            cursor.execute(f'SELECT * FROM {table_name} ORDER BY id DESC LIMIT {limit}')
-        else:
-            cursor.execute(f'SELECT * FROM {table_name} ORDER BY id DESC')
-        rows = cursor.fetchall()
+        for source_key, source_config in self.DATA_SOURCES.items():
+            if not source_config.get('enabled', True):
+                continue
+                
+            if verbose:
+                print(f"📊 Fetching {source_config['description']}...")
+                print(f"   Resource ID: {source_config['resource_id']}")
+            
+            data = self.fetch_data(source_config['resource_id'], limit=1000)
+            
+            if not data or 'records' not in data or not data['records']:
+                results[source_key] = {'count': 0, 'status': 'no_data'}
+                if verbose:
+                    print(f"   ⚠️ No data available\n")
+                continue
+            
+            # Normalize based on source type
+            if source_key == 'crop_production':
+                normalized = self.normalize_crop_data(data['records'])
+                columns = ['state', 'district', 'crop', 'season', 'year', 'area', 
+                          'production', 'data_source', 'fetch_timestamp']
+            elif source_key == 'rainfall_district':
+                normalized = self.normalize_rainfall_district_data(data['records'])
+                columns = ['SUBDIVISION', 'YEAR', 'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'annual',
+                          ]
+            elif source_key == 'production_crop_specific':
+                normalized = self.normalize_production_crop_specific(data['records'])
+                columns = ['State', 'District', 'Wheat', 'Maize',
+                            'Rice', 'Barley', 'Ragi', 'Pulses', 'common_millets',
+                            'Total', 'Chillies', 'Ginger', 'Oil_seeds'
+                          ]
+            elif source_key == 'Agency_Rainfall':
+                normalized = self.normalize_Agency_Rainfall_data(data['records'])
+                columns = ['State', 'District', 'Date', 'Year',
+                            'Month', 'Avg_rainfall', 'Agency_name'
+                          ]
+            else:
+                continue
+            
+            count, status = self.save_to_database(
+                source_config['table_name'],
+                normalized,
+                columns
+            )
+            
+            results[source_key] = {'count': count, 'status': status}
+            
+            if verbose:
+                if count > 0:
+                    print(f"   ✅ Saved {count} records to {source_config['table_name']}\n")
+                else:
+                    print(f"   ⚠️ {status}\n")
         
-        # Get column names
-        columns = [description[0] for description in cursor.description]
+        if verbose:
+            print("="*80)
+            print("✅ Data Fetching Complete")
+            print(f"\nSummary:")
+            for source, result in results.items():
+                status_icon = "✓" if result['count'] > 0 else "⚠"
+                print(f"  {status_icon} {source}: {result['count']} records ({result['status']})")
+            print("="*80 + "\n")
         
-        print("\n" + "=" * 200)
-        print(f"DATABASE TABLE: {table_name}")
-        print(f"Total Records: {total_count} | Showing: {len(rows)} (latest entries)")
-        print("=" * 200)
+        return results
+    
+    def get_database_stats(self) -> Dict:
+        """Get comprehensive database statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-        # Print headers (first 5 columns)
-        header_line = " | ".join([f"{h:20}" for h in columns])
-        print(header_line)
-        print("-" * len(header_line))
+        stats = {}
+        tables = ['crop_production', 'rainfall_district', 'production_crop_specific', 'Agency_Rainfall']
         
-        # Print rows
-        for row in rows:
-            row_values = []
-            for value in row:  # Show first 5 columns
-                if isinstance(value, str) and len(value) > 20:
-                    value = value[:17] + '...'
-                row_values.append(f"{str(value):20}")
-            print(" | ".join(row_values))
-        
-        print("=" * 200 + "\n")
+        for table in tables:
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cursor.fetchone()[0]
+                
+                # Get date range if applicable
+                date_range = None
+                if table == 'crop_production':
+                    cursor.execute(f"SELECT MIN(year), MAX(year) FROM {table} WHERE year > 0")
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        date_range = f"{result[0]}-{result[1]}"
+                elif table == 'production_crop_specific':
+                    cursor.execute(f"SELECT MIN(state), MAX(state) FROM {table}")
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        date_range = f"{result[0]}-{result[1]}"
+                
+                stats[table] = {
+                    'count': count,
+                    'date_range': date_range
+                }
+            except Exception as e:
+                stats[table] = {'count': 0, 'error': str(e)}
         
         conn.close()
-    
-    except Exception as e:
-        # Provide extra diagnostics for inability to open DB
-        try:
-            cwd = os.getcwd()
-            file_exists = os.path.exists(db_file)
-            perms = None
-            if file_exists:
-                perms = oct(os.stat(db_file).st_mode & 0o777)
-        except Exception:
-            cwd = '<unavailable>'
-            file_exists = False
-            perms = '<unavailable>'
+        return stats
 
-        print(f"✗ Error viewing database: {e}")
-        print(f"  DB path: {db_file}")
-        print(f"  CWD: {cwd}")
-        print(f"  DB exists: {file_exists}")
-        print(f"  DB perms: {perms}")
-
-def main():
-    """Main function to orchestrate the workflow"""
-    print("\n" + "=" * 100)
-    print("API Data Extraction, CSV Conversion & SQLite Storage (APPEND MODE)")
-    print("=" * 100)
-    print()
-    
-    # Configuration
-    APPEND_MODE = True  # Set to False to overwrite data each time
-    
-    # Step 1: Fetch data from API
-    print("Step 1: Fetching data from API...")
-    data = fetch_api_data()
-    
-    if data:
-        print()
-        
-        # Step 2: Display data in table format
-        print("Step 2: Displaying API data in table format...")
-        display_table(data, limit=None)
-        
-        # Step 3: Save to CSV (append mode)
-        print("Step 3: Saving to CSV...")
-        save_to_csv(data, append_mode=APPEND_MODE)
-        print()
-        
-        # Step 4: Save to SQLite (append mode)
-        print("Step 4: Saving to SQLite database...")
-        save_to_sqlite(data, append_mode=APPEND_MODE)
-        print()
-        
-        # Step 5: View database contents
-        print("Step 5: Viewing database contents...")
-        view_database_table(limit=None)
-        
-        print("=" * 100)
-        print("✓ Process completed successfully!")
-        print("=" * 100)
-        print(f"\nNote: Running in {'APPEND' if APPEND_MODE else 'OVERWRITE'} mode")
-        print("Each run will add new records to the database with timestamps.")
-    else:
-        print("\n✗ Process failed: Unable to fetch data from API")
 
 if __name__ == "__main__":
-    main()
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    API_KEY = os.getenv('YOUR_API_KEY', '579b464db66ec23bdd000001cb707f48193e4ff96953ee8fc80258d6')
+    
+    print("Initializing Multi-Source Data Fetcher...")
+    fetcher = MultiSourceDataFetcher(API_KEY)
+    
+    print("\nFetching data from all sources...")
+    results = fetcher.fetch_all_sources()
+    
+    print("\n📈 Final Database Statistics:")
+    stats = fetcher.get_database_stats()
+    for table, info in stats.items():
+        if isinstance(info, dict) and 'count' in info:
+            range_str = f" ({info['date_range']})" if info.get('date_range') else ""
+            print(f"  {table}: {info['count']:,} records{range_str}")
+        else:
+            print(f"  {table}: Error - {info}")
