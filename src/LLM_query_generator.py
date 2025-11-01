@@ -1,21 +1,23 @@
 """
-Enhanced LLM-Powered SQL Query Generator for Agricultural Data
-Compatible with OpenRouter API (GPT-5 Codex and other models)
+Advanced LLM-Powered SQL Query Generator for Agricultural Data
+Using Google Gemini API Directly
 """
 
+import requests
 import os
 import sqlite3
 import json
 import re
+import time
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
-from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 @dataclass
 class QueryResult:
@@ -26,6 +28,7 @@ class QueryResult:
     error_message: Optional[str] = None
     execution_time: float = 0.0
     row_count: int = 0
+    tables_used: List[str] = None
 
 
 class DatabaseSchema:
@@ -33,56 +36,237 @@ class DatabaseSchema:
     
     SCHEMA_INFO = {
         "crop_production": {
-            "columns": ["id", "state", "district", "crop", "season", "year", "area", "production", "data_source", "fetch_timestamp"],
-            "description": "Agricultural crop production statistics by state, district, crop, season, and year",
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "state": "TEXT (State name)",
+                "district": "TEXT (District name)",
+                "crop": "TEXT (Crop name: Rice, Wheat, Maize, Arecanut, etc.)",
+                "season": "TEXT (Kharif, Rabi, Whole Year)",
+                "year": "INTEGER (Year: 1997-2014)",
+                "area": "REAL (Area in hectares)",
+                "production": "REAL (Production in tonnes)",
+                "data_source": "TEXT",
+                "fetch_timestamp": "TEXT"
+            },
+            "description": "Detailed crop production by state, district, crop, season and year (1997-2014)",
             "sample_queries": [
-                "SELECT state, crop, SUM(production) FROM crop_production WHERE year BETWEEN 2010 AND 2015 GROUP BY state, crop",
-                "SELECT district, AVG(area) FROM crop_production WHERE state='Punjab' GROUP BY district"
-            ]
+                "SELECT state, crop, SUM(production) FROM crop_production WHERE year=2014 GROUP BY state, crop",
+                "SELECT district, AVG(area) FROM crop_production WHERE state='Punjab' AND year BETWEEN 2010 AND 2014 GROUP BY district"
+            ],
+            "row_count": "9,000 records",
+            "indexes": ["state", "district", "crop", "year"]
         },
+        
         "rainfall_district": {
-            "columns": ["id", "SUBDIVISION", "YEAR", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec", "annual"],
-            "description": "Monthly and annual rainfall data by subdivision/district",
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "SUBDIVISION": "TEXT (State/District name - joins with crop_production.state)",
+                "YEAR": "REAL (Year: 1901-2015)",
+                "jan": "REAL (January rainfall in mm)",
+                "feb": "REAL (February rainfall in mm)",
+                "mar": "REAL (March rainfall in mm)",
+                "apr": "REAL (April rainfall in mm)",
+                "may": "REAL (May rainfall in mm)",
+                "jun": "REAL (June rainfall in mm)",
+                "jul": "REAL (July rainfall in mm)",
+                "aug": "REAL (August rainfall in mm)",
+                "sep": "REAL (September rainfall in mm)",
+                "oct": "REAL (October rainfall in mm)",
+                "nov": "REAL (November rainfall in mm)",
+                "dec": "REAL (December rainfall in mm)",
+                "annual": "REAL (Total annual rainfall in mm)"
+            },
+            "description": "Monthly and annual rainfall data by subdivision/district (1901-2015)",
             "sample_queries": [
-                "SELECT SUBDIVISION, AVG(annual) FROM rainfall_district WHERE YEAR BETWEEN 2010 AND 2020 GROUP BY SUBDIVISION",
-                "SELECT SUBDIVISION, jun, jul, aug FROM rainfall_district WHERE YEAR=2015"
-            ]
+                "SELECT SUBDIVISION, AVG(annual) FROM rainfall_district WHERE YEAR BETWEEN 2010 AND 2014 GROUP BY SUBDIVISION",
+                "SELECT SUBDIVISION, jun, jul, aug FROM rainfall_district WHERE YEAR=2014"
+            ],
+            "row_count": "9,000 records",
+            "indexes": ["SUBDIVISION", "YEAR"]
         },
+        
         "production_crop_specific": {
-            "columns": ["id", "State", "District", "Wheat", "Maize", "Rice", "Barley", "Ragi", "Pulses", "common_millets", "Total", "Chillies", "Ginger", "Oil_seeds"],
-            "description": "Crop-specific production data in metric tonnes by state and district",
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "State": "TEXT (State name - currently only Himachal Pradesh)",
+                "District": "TEXT (District name)",
+                "Wheat": "REAL (Wheat production in metric tonnes)",
+                "Maize": "REAL (Maize production in metric tonnes)",
+                "Rice": "REAL (Rice production in metric tonnes)",
+                "Barley": "REAL (Barley production in metric tonnes)",
+                "Ragi": "REAL (Ragi production in metric tonnes)",
+                "Pulses": "REAL (Pulses production in metric tonnes)",
+                "common_millets": "REAL (Common millets production in metric tonnes)",
+                "Total": "REAL (Total food grains production in metric tonnes)",
+                "Chillies": "REAL (Chillies production in metric tonnes)",
+                "Ginger": "REAL (Ginger production in metric tonnes)",
+                "Oil_seeds": "REAL (Oil seeds production in metric tonnes)"
+            },
+            "description": "Crop-specific production aggregated by state and district (Himachal Pradesh only)",
             "sample_queries": [
-                "SELECT State, District, Wheat, Rice FROM production_crop_specific WHERE Wheat > 1000",
-                "SELECT State, SUM(Total) FROM production_crop_specific GROUP BY State ORDER BY SUM(Total) DESC"
-            ]
+                "SELECT District, Wheat, Rice FROM production_crop_specific WHERE Wheat > 50000",
+                "SELECT District, Total FROM production_crop_specific ORDER BY Total DESC LIMIT 5"
+            ],
+            "row_count": "117 records",
+            "indexes": ["State", "District"]
         },
+        
         "Agency_Rainfall": {
-            "columns": ["id", "State", "District", "Date", "Year", "Month", "Avg_rainfall", "Agency_name"],
-            "description": "Daily rainfall measurements by state, district, and reporting agency",
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "State": "TEXT (State name)",
+                "District": "TEXT (District name)",
+                "Date": "REAL (Date of measurement)",
+                "Year": "REAL (Year: 2018)",
+                "Month": "REAL (Month number: 1-12)",
+                "Avg_rainfall": "REAL (Average rainfall in mm)",
+                "Agency_name": "REAL (Measuring agency)",
+                "fetch_timestamp": "REAL"
+            },
+            "description": "Daily rainfall measurements by agency (mainly 2018 data from Assam)",
             "sample_queries": [
-                "SELECT State, AVG(Avg_rainfall) FROM Agency_Rainfall WHERE Year=2020 GROUP BY State",
-                "SELECT District, Month, AVG(Avg_rainfall) FROM Agency_Rainfall WHERE State='Maharashtra' GROUP BY District, Month"
-            ]
+                "SELECT State, District, AVG(Avg_rainfall) FROM Agency_Rainfall WHERE Year=2018 GROUP BY State, District",
+                "SELECT District, Month, AVG(Avg_rainfall) FROM Agency_Rainfall WHERE State='Assam' GROUP BY District, Month"
+            ],
+            "row_count": "1,000 records",
+            "indexes": ["State", "District", "Year", "Month"]
+        },
+        
+        "damages_floods": {
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "year": "INTEGER (Year)",
+                "state_ut": "TEXT (State/UT name)",
+                "flood_severity": "TEXT (Severity level)",
+                "area_affected_hectare": "REAL (Area affected in hectares)",
+                "area_affected_hectare_raw": "TEXT (Raw value)",
+                "crop_damage_value_crore": "REAL (Crop damage value in crores)",
+                "crop_damage_value_crore_raw": "TEXT (Raw value)",
+                "source": "TEXT (data.gov.in)",
+                "fetch_timestamp": "TEXT"
+            },
+            "description": "Flood damage data by state including area affected and crop damage value",
+            "sample_queries": [
+                "SELECT state_ut, SUM(area_affected_hectare) FROM damages_floods GROUP BY state_ut",
+                "SELECT year, state_ut, crop_damage_value_crore FROM damages_floods WHERE year BETWEEN 2010 AND 2020"
+            ],
+            "row_count": "324 records",
+            "indexes": ["year", "state_ut"]
+        },
+        
+        "damages_rainfall": {
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "year": "INTEGER (Year: 2012-2021)",
+                "state_ut": "TEXT (State/UT name)",
+                "crop_damage_hectare": "REAL (Crop damage area in hectares)",
+                "crop_damage_hectare_raw": "TEXT (Raw value)",
+                "crop_damage_value_crore": "REAL (Crop damage value in crores)",
+                "crop_damage_value_crore_raw": "TEXT (Raw value)",
+                "rainfall_type": "TEXT (Type of rainfall event)",
+                "source": "TEXT (data.gov.in)",
+                "fetch_timestamp": "TEXT"
+            },
+            "description": "Rainfall-related crop damage data (2012-2021) - NOTE: Most fields are NULL",
+            "row_count": "90 records",
+            "indexes": ["year", "state_ut"],
+            "note": "Data quality issue: Most records have NULL values except year"
+        },
+        
+        "extreme_temperature": {
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "year": "INTEGER (Year)",
+                "state_ut": "TEXT (State/UT name)",
+                "extreme_event_type": "TEXT (Type of extreme event)",
+                "event_days": "INTEGER (Number of event days)",
+                "event_days_raw": "TEXT (Raw value)",
+                "deaths": "INTEGER (Number of deaths)",
+                "deaths_raw": "TEXT (Raw value)",
+                "source": "TEXT (data.gov.in)",
+                "fetch_timestamp": "TEXT"
+            },
+            "description": "Extreme temperature events and casualties - NOTE: Most fields are NULL",
+            "row_count": "594 records",
+            "indexes": ["year", "state_ut"],
+            "note": "Data quality issue: Most records have NULL values"
+        },
+        
+        "drought_cases": {
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "year": "INTEGER (Year)",
+                "state_ut": "TEXT (State/UT name)",
+                "drought_severity": "TEXT (Severity level)",
+                "area_affected_hectare": "REAL (Area affected in hectares)",
+                "area_affected_hectare_raw": "TEXT (Raw value)",
+                "crop_loss_value_crore": "REAL (Crop loss value in crores)",
+                "crop_loss_value_crore_raw": "TEXT (Raw value)",
+                "source": "TEXT (data.gov.in)",
+                "fetch_timestamp": "TEXT"
+            },
+            "description": "Drought cases and crop losses by state - NOTE: Most fields are NULL",
+            "row_count": "108 records",
+            "indexes": ["year", "state_ut"],
+            "note": "Data quality issue: Most records have NULL values"
+        },
+        
+        "climate_expenditure": {
+            "columns": {
+                "id": "INTEGER PRIMARY KEY",
+                "Year": "REAL (Year)",
+                "Schemes": "TEXT (Scheme/Program name)",
+                "Actual_Expenditure": "REAL (Expenditure amount)"
+            },
+            "description": "Climate-related government expenditure by scheme and year - NOTE: Currently empty",
+            "row_count": "0 records (empty table)",
+            "indexes": ["Year"],
+            "note": "Table exists but contains no data"
         }
+    }
+    
+    TABLE_RELATIONSHIPS = [
+        {
+            "tables": ["crop_production", "rainfall_district"],
+            "join_condition": "crop_production.state = rainfall_district.SUBDIVISION AND crop_production.year = CAST(rainfall_district.YEAR AS INTEGER)",
+            "description": "Join crop production with rainfall by state and year"
+        },
+        {
+            "tables": ["crop_production", "damages_floods"],
+            "join_condition": "crop_production.state = damages_floods.state_ut AND crop_production.year = damages_floods.year",
+            "description": "Join crop production with flood damage data"
+        }
+    ]
+    
+    DATA_QUALITY_NOTES = {
+        "damages_rainfall": "WARNING: 90 records but most have NULL values",
+        "extreme_temperature": "WARNING: 594 records but most have NULL values",
+        "drought_cases": "WARNING: 108 records but most have NULL values",
+        "climate_expenditure": "WARNING: Table is empty",
+        "production_crop_specific": "NOTE: Only Himachal Pradesh data",
+        "Agency_Rainfall": "NOTE: Primarily 2018 Assam data"
     }
     
     @classmethod
     def get_schema_description(cls) -> str:
-        """Generate detailed schema description for LLM"""
-        desc = "DATABASE SCHEMA:\n\n"
+        desc = "DATABASE SCHEMA - AGRICULTURAL DATA\n\n"
+        desc += "DATA QUALITY NOTES:\n"
+        for table, note in cls.DATA_QUALITY_NOTES.items():
+            desc += f"- {table}: {note}\n"
+        desc += "\n"
+        
         for table, info in cls.SCHEMA_INFO.items():
-            desc += f"Table: {table}\n"
+            desc += f"TABLE: {table}\n"
             desc += f"Description: {info['description']}\n"
-            desc += f"Columns: {', '.join(info['columns'])}\n"
-            desc += "Sample Queries:\n"
-            for sq in info['sample_queries']:
-                desc += f"  - {sq}\n"
+            desc += "Columns:\n"
+            for col, col_desc in info['columns'].items():
+                desc += f"  - {col}: {col_desc}\n"
             desc += "\n"
+        
         return desc
     
     @classmethod
     def get_table_info(cls, db_path: str) -> Dict[str, Any]:
-        """Get actual table statistics from database"""
         conn = sqlite3.connect(db_path)
         stats = {}
         
@@ -91,15 +275,7 @@ class DatabaseSchema:
                 cursor = conn.cursor()
                 cursor.execute(f"SELECT COUNT(*) FROM {table}")
                 count = cursor.fetchone()[0]
-                
-                # Get sample data
-                cursor.execute(f"SELECT * FROM {table} LIMIT 3")
-                sample = cursor.fetchall()
-                
-                stats[table] = {
-                    "row_count": count,
-                    "sample_data": sample[:2] if sample else []
-                }
+                stats[table] = {"row_count": count}
             except Exception as e:
                 stats[table] = {"error": str(e)}
         
@@ -107,160 +283,122 @@ class DatabaseSchema:
         return stats
 
 
-class SQLQueryGenerator:
-    """LLM-powered SQL query generator with validation (OpenRouter compatible)"""
+class GeminiAPIClient:
+    """Google Gemini API client"""
     
-    SQL_GENERATION_PROMPT = """You are an expert SQL query generator for an agricultural database. Generate a SAFE, VALID SQLite query based on the user's question.
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-exp"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        print(f"✅ Gemini API Client initialized")
+        print(f"   Model: {self.model}")
+    
+    def generate_content(self, prompt: str, temperature: float = 0.1, max_tokens: int = 1500, retries: int = 3) -> str:
+        """Call Gemini API"""
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+                "topP": 0.95,
+                "topK": 40
+            }
+        }
+        
+        for attempt in range(1, retries + 1):
+            try:
+                print(f"🔄 API call attempt {attempt}/{retries}...")
+                
+                response = requests.post(url, json=payload, timeout=60)
+                print(f"   Status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    print("   ✅ Success!")
+                    data = response.json()
+                    
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        content = data["candidates"][0]["content"]["parts"][0]["text"]
+                        return content
+                    else:
+                        raise RuntimeError("No content in response")
+                        
+                elif response.status_code == 429:
+                    print(f"   ⚠️  Rate limited, waiting...")
+                    if attempt < retries:
+                        time.sleep(5 * attempt)
+                        continue
+                    raise RuntimeError("Rate limit exceeded")
+                    
+                else:
+                    error_msg = response.text
+                    print(f"   ❌ Error: {error_msg}")
+                    raise RuntimeError(f"HTTP {response.status_code}: {error_msg}")
+                    
+            except requests.exceptions.Timeout:
+                print(f"   ⏳ Timeout, retrying...")
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError("Request timeout")
+                
+            except Exception as e:
+                if attempt < retries:
+                    print(f"   ⚠️  Error: {e}, retrying...")
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+        
+        raise RuntimeError("All retries failed")
+
+
+class SQLQueryGenerator:
+    """SQL query generator using Gemini"""
+    
+    ADVANCED_SQL_PROMPT = """You are an expert SQL query generator for agricultural data.
 
 {schema}
 
-STRICT RULES:
-1. ONLY use SELECT statements - NO INSERT, UPDATE, DELETE, DROP, ALTER
-2. Use proper JOINs when combining tables
-3. Use aggregation functions (SUM, AVG, COUNT, MAX, MIN) appropriately
-4. Always include LIMIT clause (max 1000 rows)
-5. Use WHERE clauses for filtering
-6. Use GROUP BY with aggregations
-7. Use ORDER BY for sorting
-8. Handle NULL values appropriately
-9. Use DISTINCT when needed to avoid duplicates
-10. For time ranges, use BETWEEN operator
+RULES:
+1. Only SELECT statements. NO INSERT, UPDATE, DELETE, DROP, ALTER
+2. Use proper JOINs for multi-table queries
+3. Use aggregation functions (SUM, AVG, COUNT, MAX, MIN) with GROUP BY
+4. Always include LIMIT (max 1000 rows)
+5. Use WHERE for filtering, ORDER BY for sorting
 
-TABLE RELATIONSHIPS:
-- crop_production.state can JOIN with rainfall_district.SUBDIVISION (approximate match)
-- crop_production.state can JOIN with production_crop_specific.State
-- crop_production.state can JOIN with Agency_Rainfall.State
+USER QUESTION: {question}
 
-IMPORTANT NOTES:
-- rainfall_district uses 'SUBDIVISION' not 'state'
-- production_crop_specific has crop columns (Wheat, Rice, etc.) as integers
-- Agency_Rainfall has daily data, may need aggregation
-- crop_production has year as INTEGER
-- Always use CAST or proper type conversions when comparing columns
+DATABASE STATS: {db_stats}
 
-User Question: {question}
-
-Database Statistics:
-{db_stats}
-
-Generate a JSON response with:
+Return ONLY valid JSON (no markdown):
 {{
-    "sql_query": "the complete SQL query",
-    "explanation": "brief explanation of what the query does",
-    "tables_used": ["list", "of", "tables"],
+    "sql_query": "Complete SQL query",
+    "explanation": "Brief explanation",
+    "tables_used": ["list"],
     "complexity": "simple|moderate|complex",
-    "estimated_rows": approximate number of result rows
-}}
-
-If the question is ambiguous or cannot be answered with available data, return:
-{{
-    "sql_query": "",
-    "explanation": "Clear explanation of why query cannot be generated",
-    "tables_used": [],
-    "complexity": "none",
-    "estimated_rows": 0
+    "estimated_rows": number
 }}"""
 
-    # OpenRouter model mappings
-    OPENROUTER_MODELS = {
-        "gpt-5-codex": "openai/gpt-5-codex",
-        "gpt-4-turbo": "openai/gpt-4-turbo",
-        "gpt-4": "openai/gpt-4",
-        "gpt-3.5-turbo": "openai/gpt-3.5-turbo",
-        "claude-3-opus": "anthropic/claude-3-opus",
-        "claude-3-sonnet": "anthropic/claude-3-sonnet",
-        # Add more models as needed
-    }
-
-    def __init__(
-        self, 
-        api_key: Optional[str] = None, 
-        model: str = "gpt-5-codex",
-        use_openrouter: bool = True,
-        openrouter_api_key: Optional[str] = None
-    ):
-        """
-        Initialize with OpenRouter or OpenAI API
-        
-        Args:
-            api_key: OpenAI API key (for direct OpenAI usage)
-            model: Model name (short name like 'gpt-5-codex' or full OpenRouter path)
-            use_openrouter: Whether to use OpenRouter API
-            openrouter_api_key: OpenRouter API key (if different from OPENAI_API_KEY)
-        """
-        self.use_openrouter = use_openrouter
-        
-        if use_openrouter:
-            # OpenRouter configuration
-            self.api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-            if not self.api_key:
-                raise ValueError(
-                    "OpenRouter API key required. Set OPENROUTER_API_KEY or OPENAI_API_KEY environment variable."
-                )
-            
-            # Map short model name to OpenRouter path
-            self.model = self.OPENROUTER_MODELS.get(model, model)
-            
-            # Initialize OpenAI client with OpenRouter base URL
-            self.client = OpenAI(
-                api_key=self.api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
-            
-            print(f"✅ Initialized with OpenRouter API")
-            print(f"   Model: {self.model}")
-        else:
-            # Standard OpenAI configuration
-            self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-            if not self.api_key:
-                raise ValueError("OpenAI API key required. Set OPENAI_API_KEY environment variable.")
-            
-            self.model = model
-            self.client = OpenAI(api_key=self.api_key)
-            print(f"✅ Initialized with OpenAI API")
-            print(f"   Model: {self.model}")
-        
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-exp"):
+        self.client = GeminiAPIClient(api_key, model)
         self.schema = DatabaseSchema()
     
     def generate_query(self, question: str, db_path: str) -> Dict[str, Any]:
-        """Generate SQL query from natural language question"""
         try:
-            # Get database statistics
             db_stats = self.schema.get_table_info(db_path)
             
-            # Prepare prompt
-            prompt = self.SQL_GENERATION_PROMPT.format(
+            prompt = self.ADVANCED_SQL_PROMPT.format(
                 schema=self.schema.get_schema_description(),
                 question=question,
                 db_stats=json.dumps(db_stats, indent=2)
             )
             
-            # Prepare request parameters
-            request_params = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": "You are an expert SQL query generator. Always return valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.1,
-                "max_tokens": 1000
-            }
+            content = self.client.generate_content(prompt, temperature=0.1, max_tokens=1500)
             
-            # Add OpenRouter-specific headers if using OpenRouter
-            if self.use_openrouter:
-                # OpenRouter supports extra_headers for additional metadata
-                request_params["extra_headers"] = {
-                    "HTTP-Referer": "https://github.com/your-repo",  # Optional: your app URL
-                    "X-Title": "Agricultural QA System"  # Optional: your app name
-                }
-            
-            # Call API
-            response = self.client.chat.completions.create(**request_params)
-            
-            # Parse response
-            content = response.choices[0].message.content.strip()
-            
-            # Extract JSON from response (handle markdown code blocks)
+            # Extract JSON
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
             if json_match:
                 content = json_match.group(1)
@@ -271,76 +409,62 @@ If the question is ambiguous or cannot be answered with available data, return:
             
             result = json.loads(content)
             
-            # Validate query
             if result.get("sql_query"):
                 is_valid, error = self._validate_query(result["sql_query"])
                 if not is_valid:
                     result["sql_query"] = ""
-                    result["explanation"] = f"Generated query failed validation: {error}"
+                    result["explanation"] = f"Validation failed: {error}"
             
             return result
             
-        except json.JSONDecodeError as e:
-            return {
-                "sql_query": "",
-                "explanation": f"Failed to parse LLM response: {str(e)}",
-                "tables_used": [],
-                "complexity": "error",
-                "estimated_rows": 0
-            }
         except Exception as e:
+            print(f"❌ Query generation error: {str(e)}")
             return {
                 "sql_query": "",
-                "explanation": f"Error generating query: {str(e)}",
+                "explanation": f"Error: {str(e)}",
                 "tables_used": [],
                 "complexity": "error",
                 "estimated_rows": 0
             }
     
     def _validate_query(self, sql: str) -> Tuple[bool, Optional[str]]:
-        """Validate SQL query for safety"""
         sql_lower = sql.lower().strip()
         
-        # Check for dangerous keywords
-        dangerous = ["insert", "update", "delete", "drop", "alter", "create", "truncate", "exec", "execute"]
+        dangerous = ["insert", "update", "delete", "drop", "alter", "create", "truncate"]
         for keyword in dangerous:
             if keyword in sql_lower:
-                return False, f"Dangerous keyword detected: {keyword}"
+                return False, f"Dangerous keyword: {keyword}"
         
-        # Must start with SELECT or WITH
         if not (sql_lower.startswith("select") or sql_lower.startswith("with")):
-            return False, "Query must start with SELECT or WITH"
+            return False, "Must start with SELECT or WITH"
         
-        # Check for semicolons (prevent query chaining)
-        if sql.count(";") > 1:
-            return False, "Multiple statements not allowed"
-        
-        # Check for LIMIT clause
         if "limit" not in sql_lower:
-            return False, "LIMIT clause required for safety"
+            return False, "LIMIT clause required"
         
         return True, None
 
 
 class QueryExecutor:
-    """Executes SQL queries and manages results"""
+    """Executes SQL queries"""
     
     def __init__(self, db_path: str):
         self.db_path = db_path
     
     def execute_query(self, sql: str, max_rows: int = 1000) -> QueryResult:
-        """Execute SQL query and return results"""
         start_time = datetime.now()
         
         try:
-            # Ensure LIMIT is applied
             if "limit" not in sql.lower():
                 sql = f"{sql.rstrip(';')} LIMIT {max_rows};"
             
-            # Connect and execute
             conn = sqlite3.connect(self.db_path)
             df = pd.read_sql_query(sql, conn)
             conn.close()
+            
+            tables_used = []
+            for table in DatabaseSchema.SCHEMA_INFO.keys():
+                if table in sql.lower():
+                    tables_used.append(table)
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
@@ -349,9 +473,9 @@ class QueryExecutor:
                 data=df,
                 sql_query=sql,
                 execution_time=execution_time,
-                row_count=len(df)
+                row_count=len(df),
+                tables_used=tables_used
             )
-            
         except Exception as e:
             return QueryResult(
                 success=False,
@@ -363,204 +487,96 @@ class QueryExecutor:
 
 
 class AnswerSynthesizer:
-    """Generates natural language answers from query results (OpenRouter compatible)"""
+    """Generates natural language answers using Gemini"""
     
-    SYNTHESIS_PROMPT = """You are an agricultural data analyst. Generate a clear, conversational answer based on the query results.
+    SYNTHESIS_PROMPT = """You are an agricultural data analyst.
 
-Original Question: {question}
-
-SQL Query Executed:
-```sql
-{sql_query}
-```
-
-Query Results ({row_count} rows):
+QUESTION: {question}
+SQL QUERY: {sql_query}
+RESULTS ({row_count} rows):
 {results_preview}
 
-Tables Used: {tables_used}
+Provide a clear answer (1 paragraphs) with specific numbers and insights."""
 
-Generate a comprehensive answer that:
-1. Directly answers the user's question
-2. Highlights key insights and patterns
-3. Includes specific numbers and comparisons
-4. Mentions data sources (tables used)
-5. Notes any limitations or caveats
-6. Uses a friendly, conversational tone
-
-Keep the answer concise (3-5 paragraphs max) but informative."""
-
-    def __init__(
-        self, 
-        api_key: Optional[str] = None, 
-        model: str = "gpt-4-turbo",
-        use_openrouter: bool = True,
-        openrouter_api_key: Optional[str] = None
-    ):
-        """Initialize with OpenRouter or OpenAI API"""
-        self.use_openrouter = use_openrouter
-        
-        if use_openrouter:
-            self.api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-            # Map short model name to OpenRouter path
-            model_mapping = {
-                "gpt-4-turbo": "openai/gpt-4-turbo",
-                "gpt-4": "openai/gpt-4",
-                "gpt-3.5-turbo": "openai/gpt-3.5-turbo",
-                "claude-3-sonnet": "anthropic/claude-3-sonnet"
-            }
-            self.model = model_mapping.get(model, model)
-            self.client = OpenAI(
-                api_key=self.api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
-        else:
-            self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-            self.model = model
-            self.client = OpenAI(api_key=self.api_key)
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-exp"):
+        self.client = GeminiAPIClient(api_key, model)
     
-    def synthesize_answer(
-        self, 
-        question: str, 
-        query_result: QueryResult, 
-        query_metadata: Dict[str, Any]
-    ) -> str:
-        """Generate natural language answer from query results"""
-        
+    def synthesize_answer(self, question: str, query_result: QueryResult, query_metadata: Dict[str, Any]) -> str:
         if not query_result.success:
-            return f"❌ **Error executing query:** {query_result.error_message}\n\nThe generated SQL query could not be executed. Please try rephrasing your question or ask about different data."
+            return f"❌ Error: {query_result.error_message}"
         
         if query_result.data is None or query_result.data.empty:
-            return "📊 **No data found** matching your query criteria. This could mean:\n- The data doesn't exist for the specified filters\n- Try adjusting year ranges or location filters\n- Check if the crop/location names are spelled correctly"
+            return "📊 No data found. Try adjusting your filters."
         
         try:
-            # Prepare results preview
             df = query_result.data
-            preview_rows = min(20, len(df))
+            preview = df.head(15).to_string(index=False)
             
-            # Format preview nicely
-            results_preview = df.head(preview_rows).to_string(index=False)
+            if len(df) > 15:
+                preview += f"\n\n... ({len(df)} total rows)"
             
-            # If many rows, add summary statistics
-            if len(df) > preview_rows:
-                results_preview += f"\n\n... (showing first {preview_rows} of {len(df)} rows)"
-                
-                # Add summary for numeric columns
-                numeric_cols = df.select_dtypes(include=['number']).columns
-                if len(numeric_cols) > 0:
-                    results_preview += "\n\nSummary Statistics:\n"
-                    results_preview += df[numeric_cols].describe().to_string()
-            
-            # Generate answer using LLM
             prompt = self.SYNTHESIS_PROMPT.format(
                 question=question,
                 sql_query=query_result.sql_query,
                 row_count=query_result.row_count,
-                results_preview=results_preview,
-                tables_used=", ".join(query_metadata.get("tables_used", []))
+                results_preview=preview
             )
             
-            request_params = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": "You are a helpful agricultural data analyst. Provide clear, accurate answers based on data."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.3,
-                "max_tokens": 800
-            }
+            answer = self.client.generate_content(prompt, temperature=0.3, max_tokens=800)
             
-            if self.use_openrouter:
-                request_params["extra_headers"] = {
-                    "HTTP-Referer": "https://github.com/your-repo",
-                    "X-Title": "Agricultural QA System"
-                }
-            
-            response = self.client.chat.completions.create(**request_params)
-            answer = response.choices[0].message.content.strip()
-            
-            # Add metadata footer
-            footer = f"\n\n---\n**Query Details:**\n"
-            footer += f"- Tables: {', '.join(query_metadata.get('tables_used', []))}\n"
-            footer += f"- Rows returned: {query_result.row_count:,}\n"
-            footer += f"- Execution time: {query_result.execution_time:.2f}s\n"
-            footer += f"- Complexity: {query_metadata.get('complexity', 'unknown')}"
+            footer = f"\n\n---\n**Details:**\n"
+            footer += f"- Tables: {', '.join(query_result.tables_used or [])}\n"
+            footer += f"- Rows: {query_result.row_count:,}\n"
+            footer += f"- Time: {query_result.execution_time:.2f}s"
             
             return answer + footer
             
         except Exception as e:
-            return f"❌ **Error generating answer:** {str(e)}\n\nRaw data preview:\n{query_result.data.head(10).to_string()}"
+            print(f"⚠️  LLM synthesis failed, using fallback")
+            return self._generate_fallback(question, query_result)
+    
+    def _generate_fallback(self, question: str, query_result: QueryResult) -> str:
+        df = query_result.data
+        answer = f"📊 **Results for:** {question}\n\n"
+        
+        if len(df) <= 10:
+            answer += "**Complete Results:**\n```\n" + df.to_string(index=False) + "\n```\n"
+        else:
+            answer += f"**Top 10 Results** (out of {len(df)}):\n```\n"
+            answer += df.head(10).to_string(index=False) + "\n```\n"
+        
+        return answer
 
 
 class AgriculturalQASystem:
-    """Main QA system orchestrating all components (OpenRouter compatible)"""
+    """Main QA system using Google Gemini"""
     
-    def __init__(
-        self, 
-        db_path: str, 
-        api_key: Optional[str] = None,
-        use_openrouter: bool = True,
-        query_model: str = "gpt-5-codex",
-        answer_model: str = "gpt-4-turbo"
-    ):
-        """
-        Initialize QA System
-        
-        Args:
-            db_path: Path to SQLite database
-            api_key: API key (OpenRouter or OpenAI)
-            use_openrouter: Whether to use OpenRouter API
-            query_model: Model for SQL generation
-            answer_model: Model for answer synthesis
-        """
+    def __init__(self, db_path: str, api_key: Optional[str] = None, model: str = "gemini-2.0-flash-exp"):
         self.db_path = db_path
-        self.use_openrouter = use_openrouter
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         
-        # Initialize components
-        self.query_generator = SQLQueryGenerator(
-            api_key=api_key,
-            model=query_model,
-            use_openrouter=use_openrouter,
-            openrouter_api_key=api_key
-        )
+        if not self.api_key:
+            raise ValueError("Google API key required. Set GOOGLE_API_KEY or GEMINI_API_KEY in .env")
         
+        self.query_generator = SQLQueryGenerator(self.api_key, model)
         self.query_executor = QueryExecutor(db_path)
-        
-        self.answer_synthesizer = AnswerSynthesizer(
-            api_key=api_key,
-            model=answer_model,
-            use_openrouter=use_openrouter,
-            openrouter_api_key=api_key
-        )
+        self.answer_synthesizer = AnswerSynthesizer(self.api_key, model)
     
     def answer_question(self, question: str) -> Dict[str, Any]:
-        """
-        End-to-end question answering pipeline
-        
-        Returns:
-            Dict containing answer, SQL query, data, and metadata
-        """
-        # Step 1: Generate SQL query
         query_metadata = self.query_generator.generate_query(question, self.db_path)
         
         if not query_metadata.get("sql_query"):
             return {
                 "success": False,
                 "question": question,
-                "answer": f"❌ **Unable to generate query:** {query_metadata.get('explanation', 'Unknown error')}",
+                "answer": f"❌ Cannot generate query: {query_metadata.get('explanation')}",
                 "sql_query": None,
                 "data": None,
                 "metadata": query_metadata
             }
         
-        # Step 2: Execute query
         query_result = self.query_executor.execute_query(query_metadata["sql_query"])
-        
-        # Step 3: Synthesize answer
-        answer = self.answer_synthesizer.synthesize_answer(
-            question, 
-            query_result, 
-            query_metadata
-        )
+        answer = self.answer_synthesizer.synthesize_answer(question, query_result, query_metadata)
         
         return {
             "success": query_result.success,
@@ -571,56 +587,59 @@ class AgriculturalQASystem:
             "metadata": {
                 **query_metadata,
                 "execution_time": query_result.execution_time,
-                "row_count": query_result.row_count
+                "row_count": query_result.row_count,
+                "tables_used": query_result.tables_used
             }
         }
 
 
-# CLI Testing Interface
+# CLI Testing
 if __name__ == "__main__":
     import sys
     
     DB_PATH = "data/agricultural_data.db"
     
+    print("\n" + "=" * 80)
+    print("SYSTEM DIAGNOSTICS")
+    print("=" * 80)
+    print(f"✓ Python: {sys.version.split()[0]}")
+    print(f"✓ Database: {DB_PATH}")
+    print(f"✓ DB exists: {os.path.exists(DB_PATH)}")
+    
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    print(f"✓ GOOGLE_API_KEY: {'✅ Set' if api_key else '❌ Missing'}")
+    
     if not os.path.exists(DB_PATH):
-        print(f"❌ Database not found: {DB_PATH}")
+        print(f"\n❌ Database not found: {DB_PATH}")
         sys.exit(1)
     
-    print("="*80)
-    print("Agricultural QA System - CLI Test (OpenRouter)")
-    print("="*80)
+    if not api_key:
+        print("\n❌ Google API Key not found!")
+        print("Set GOOGLE_API_KEY or GEMINI_API_KEY in your .env file")
+        print("Get your key from: https://aistudio.google.com/app/apikey")
+        sys.exit(1)
     
-    # Initialize with OpenRouter
-    qa_system = AgriculturalQASystem(
-        DB_PATH,
-        use_openrouter=True,
-        query_model="gpt-5-codex",  # or any OpenRouter model
-        answer_model="gpt-4-turbo"
-    )
+    print("\n" + "=" * 80)
+    print("AGRICULTURAL QA SYSTEM - TEST (Google Gemini)")
+    print("=" * 80)
     
-    # Test questions
-    test_questions = [
-        "What was the average annual rainfall in Punjab between 2010 and 2015?",
-        "Which state produced the most rice in 2014?",
-        "Show me the top 5 districts by wheat production",
-        "Compare rainfall between Maharashtra and Karnataka"
-    ]
-    
-    print("\nRunning test questions...\n")
-    
-    for i, question in enumerate(test_questions, 1):
-        print(f"\n{'='*80}")
-        print(f"Question {i}: {question}")
-        print('='*80)
+    try:
+        qa_system = AgriculturalQASystem(DB_PATH)
         
-        result = qa_system.answer_question(question)
+        questions = [
+            "Which state produced the most rice in 2014?",
+            "Show top 5 districts by wheat production",
+        ]
         
-        print(f"\n📊 SQL Query:\n{result['sql_query']}\n")
-        print(f"💬 Answer:\n{result['answer']}\n")
+        for i, q in enumerate(questions, 1):
+            print(f"\n{'='*80}\nQuestion {i}: {q}\n{'='*80}")
+            result = qa_system.answer_question(q)
+            print(f"\n📊 SQL:\n{result['sql_query']}\n")
+            print(f"💬 Answer:\n{result['answer']}\n")
         
-        if result['data'] is not None and not result['data'].empty:
-            print(f"📈 Data Preview:\n{result['data'].head().to_string()}\n")
-    
-    print("\n" + "="*80)
-    print("✅ Test complete!")
-    print("="*80)
+        print("\n✅ Test complete!")
+        
+    except Exception as e:
+        print(f"\n❌ System error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
